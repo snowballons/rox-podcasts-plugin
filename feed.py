@@ -4,6 +4,7 @@ Depends only on protocol (HTTP settings, Failure, clipping, key and
 duration helpers, global config state).
 """
 
+import re
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -20,6 +21,45 @@ from protocol import (
 )
 from store import get_feed_cache, put_feed_cache
 
+# Same bound as cliamp's feed reader: one huge feed must not eat RAM
+# or blow the 1 MiB stdout line cap downstream.
+MAX_FEED_BODY = 32 << 20
+
+XML_ENCODING_RE = re.compile(
+    rb"<\?xml[^?]*?encoding\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE
+)
+XML_DECL_ENCODING_RE = re.compile(
+    r"<\?xml([^?]*?)encoding\s*=\s*[\"'][^\"']*[\"']", re.IGNORECASE
+)
+
+
+def decode_feed_body(content, http_charset):
+    """Decode raw feed bytes to str, honouring XML/HTTP charset labels.
+
+    Tries the XML declaration, then the HTTP Content-Type charset, then
+    UTF-8, then Windows-1252 (total, like browsers). The encoding
+    declaration is stripped afterwards: ElementTree rejects unicode
+    strings that still carry one.
+    """
+    candidates = []
+    match = XML_ENCODING_RE.search(content[:300])
+    if match:
+        candidates.append(match.group(1).decode("ascii", "ignore"))
+    # UTF-8 before the HTTP label: a wrong server header must not beat
+    # bytes that already decode as UTF-8 (same precedence as Go's
+    # encoding/xml, which only consults the XML declaration).
+    candidates.append("utf-8")
+    if http_charset:
+        candidates.append(http_charset)
+    candidates.append("windows-1252")
+    for codec in dict.fromkeys(candidates):
+        try:
+            text = content.decode(codec)
+        except (LookupError, UnicodeDecodeError):
+            continue
+        return XML_DECL_ENCODING_RE.sub(r"<?xml\1", text, count=1)
+    raise Failure(-32000, "Feed body is not decodable text")
+
 
 def parse_feed(feed_url):
     cached = get_feed_cache(feed_url)
@@ -31,9 +71,13 @@ def parse_feed(feed_url):
             headers["If-Modified-Since"] = cached[1]
 
     req = urllib.request.Request(feed_url, headers=headers)
+    http_charset = None
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-            content = resp.read()
+            content = resp.read(MAX_FEED_BODY + 1)
+            if len(content) > MAX_FEED_BODY:
+                raise Failure(-32000, f"Feed exceeds {MAX_FEED_BODY} bytes: {feed_url}")
+            http_charset = resp.headers.get_content_charset()
             etag = resp.getheader("ETag")
             last_modified = resp.getheader("Last-Modified")
             if etag or last_modified:
@@ -47,7 +91,7 @@ def parse_feed(feed_url):
         raise Failure(-32000, f"Failed to fetch RSS: {e}")
 
     try:
-        root = ET.fromstring(content)
+        root = ET.fromstring(decode_feed_body(content, http_charset))
     except ET.ParseError as e:
         raise Failure(-32000, f"Malformed XML feed: {e}")
 
