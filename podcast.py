@@ -615,7 +615,7 @@ def rpc_search(params):
         try:
             feed = parse_feed(query)
             cache_show(query, feed["title"], feed["author"], feed["artwork"])
-            add_subscription(query, feed["title"], feed["author"], feed["artwork"])
+            # Do NOT auto-subscribe; preview only
             node_id = f"show:{clean_key(query)}"
             return {
                 "entries": [{
