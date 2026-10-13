@@ -18,14 +18,32 @@ from protocol import (
     parse_pub_date,
     state,
 )
+from store import get_feed_cache, put_feed_cache
 
 
 def parse_feed(feed_url):
-    req = urllib.request.Request(feed_url, headers={"User-Agent": USER_AGENT})
+    cached = get_feed_cache(feed_url)
+    headers = {"User-Agent": USER_AGENT}
+    if cached:
+        if cached[0]:
+            headers["If-None-Match"] = cached[0]
+        if cached[1]:
+            headers["If-Modified-Since"] = cached[1]
+
+    req = urllib.request.Request(feed_url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             content = resp.read()
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
+            etag = resp.getheader("ETag")
+            last_modified = resp.getheader("Last-Modified")
+            if etag or last_modified:
+                put_feed_cache(feed_url, etag, last_modified, content.decode("latin-1"))
+    except urllib.error.HTTPError as e:
+        if e.code == 304 and cached and cached[2] is not None:
+            content = cached[2].encode("latin-1")
+        else:
+            raise Failure(-32000, f"Failed to fetch RSS: {e}")
+    except (urllib.error.URLError, OSError) as e:
         raise Failure(-32000, f"Failed to fetch RSS: {e}")
 
     try:

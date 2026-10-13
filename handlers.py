@@ -19,6 +19,7 @@ from protocol import (
     VERSION,
     Failure,
     clean_key,
+    fan,
     has_feature,
     hint_for_url,
     log,
@@ -87,7 +88,10 @@ def rpc_browse(params):
     # 2. Home view
     if node == "home":
         sections = []
-        # Subscriptions Shelf
+        # Charts fetch runs alongside the local subscription read so a
+        # slow directory never blocks what is already on disk. Bounded
+        # below the browse timeout; a miss just drops the shelf.
+        pending_top = fan.submit(apple_top_charts, state["country"])
         subs = get_subscriptions()
         if subs:
             sub_nodes = [
@@ -105,7 +109,11 @@ def rpc_browse(params):
             sections.extend(make_section("Subscribed Podcasts", sub_nodes, tiles=True))
 
         # Top Charts Shelf
-        top = apple_top_charts(state["country"])[:10]
+        try:
+            top = pending_top.result(timeout=12)[:10]
+        except Exception as e:  # noqa: BLE001 - slow/failed charts drop the shelf
+            log(f"home charts missed: {e}")
+            top = []
         if top:
             top_nodes = [
                 make_node(

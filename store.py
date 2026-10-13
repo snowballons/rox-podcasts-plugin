@@ -135,6 +135,28 @@ def get_show_artwork(feed_url):
         return row[0] if row and row[0] else None
 
 
+def get_feed_cache(feed_url):
+    """Return (etag, last_modified, xml_text, fetched_at) or None."""
+    with db_lock:
+        return db_conn.execute(
+            "SELECT etag, last_modified, xml_data, fetched_at FROM feed_cache WHERE feed_url = ?",
+            (feed_url,),
+        ).fetchone()
+
+
+def put_feed_cache(feed_url, etag, last_modified, xml_text):
+    """Store a feed body (latin-1 round-trips bytes losslessly) with validators."""
+    with db_lock:
+        db_conn.execute(
+            """
+            INSERT OR REPLACE INTO feed_cache (feed_url, etag, last_modified, xml_data, fetched_at)
+            VALUES (?, ?, ?, ?, ?)
+        """,
+            (feed_url, etag, last_modified, xml_text, int(time.time())),
+        )
+        db_conn.commit()
+
+
 def resolve_feed_url(key):
     """Resolve a show:<hash> key to its feed_url via subscriptions then shows cache."""
     for f in get_subscriptions():
