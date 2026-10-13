@@ -160,6 +160,26 @@ def get_show_by_key(key):
                 return (feed_url,)
         return None
 
+def get_show_artwork(feed_url):
+    """Return the cached artwork URL for a show, or None."""
+    with db_lock:
+        row = db_conn.execute(
+            "SELECT artwork FROM shows WHERE feed_url = ?", (feed_url,)
+        ).fetchone()
+        return row[0] if row and row[0] else None
+
+
+def mime_of(data):
+    """Detect mime type from magic bytes."""
+    if data.startswith(b"\xff\xd8"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG"):
+        return "image/png"
+    if data[:3] == b"GIF":
+        return "image/gif"
+    if data[:4] == b"WEBP":
+        return "image/webp"
+    return None
 
 # ── Helpers & Parsers ──────────────────────────────────────────────
 
@@ -523,7 +543,7 @@ def rpc_browse(params):
                 "subtitle": s["author"],
                 "collection": True,
                 "kind": "album",
-                "art": s["feed_url"],
+                "art": s["artwork"],
                 "flags": ["subscribed"] if is_subscribed(s["feed_url"]) else [],
             }
         } for s in shows]
@@ -552,7 +572,7 @@ def rpc_browse(params):
                 "subtitle": s["author"],
                 "collection": True,
                 "kind": "album",
-                "art": s["feed_url"],
+                "art": s["artwork"],
                 "flags": ["subscribed"] if is_subscribed(s["feed_url"]) else [],
             }
         } for s in shows]
@@ -605,7 +625,7 @@ def rpc_search(params):
                         "subtitle": feed["author"],
                         "collection": True,
                         "kind": "album",
-                        "art": query,
+                        "art": feed["artwork"],
                         "flags": ["subscribed"],
                     }
                 }],
@@ -623,7 +643,7 @@ def rpc_search(params):
             "subtitle": s["author"],
             "collection": True,
             "kind": "album",
-            "art": s["feed_url"],
+            "art": s["artwork"],
             "flags": ["subscribed"] if is_subscribed(s["feed_url"]) else [],
         }
     } for s in shows]
@@ -733,20 +753,43 @@ def rpc_close(params):
 
 def rpc_cover(params):
     key = params.get("key")
-    # Node cover passes feed_url; Track key looks up cached feed artwork
-    url = key if key.startswith("http") else None
-    if not url:
+    url = None
+
+    if key.startswith("show:"):
+        # Show node cover: resolve show hash → feed_url → artwork
+        feed_key = key[len("show:"):]
+        feed_url = None
+        for f in get_subscriptions():
+            if clean_key(f[0]) == feed_key:
+                feed_url = f[0]
+                break
+        if not feed_url:
+            cached = get_show_by_key(feed_key)
+            if cached:
+                feed_url = cached[0]
+        if feed_url:
+            url = get_show_artwork(feed_url)
+    elif key.startswith("ep:"):
+        # Episode cover: look up in metadata cache
         meta = ep_metadata_cache.get(key)
         if meta:
             url = meta[2]
+    elif key.startswith("http"):
+        # Direct URL (fallback)
+        url = key
+
     if not url:
         return None
 
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-            data = resp.read(700 * 1024)
-            mime = resp.getheader("Content-Type", "image/jpeg")
+            data = resp.read(700 * 1024 + 1)
+            if len(data) > 700 * 1024:
+                return None
+            mime = mime_of(data)
+            if not mime:
+                return None
             return {"mime": mime, "data": base64.b64encode(data).decode("ascii")}
     except Exception:  # noqa: BLE001 - image fetch failures
         return None
