@@ -21,10 +21,32 @@ episodes from Apple's podcast directory and any publisher RSS feed.
 
 ## Installation
 
+Automatic install (downloads the 10 plugin files to Rox's plugins folder
+for your platform — Linux, macOS, or Windows Git Bash):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/snowballons/rox-podcasts-plugin/main/install.sh -o /tmp/rox-podcast-install.sh \
+  && bash /tmp/rox-podcast-install.sh
+```
+
+Native Windows PowerShell instead:
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/snowballons/rox-podcasts-plugin/main/install.ps1 -OutFile $env:TEMP\rox-podcast-install.ps1
+& $env:TEMP\rox-podcast-install.ps1
+```
+
+Both scripts check for Python 3, refuse to overwrite an existing install,
+and verify the download before copying. Then:
+
 1. Turn on **Enable Plugins** in Settings > Plugins
-2. Press **Reveal Folder** to open the plugins directory
-3. Drop this folder in (it must be named `podcast` to match its `plugin.json` id)
-4. Switch the plugin on and approve the trust card
+2. Switch the plugin on and approve the trust card
+
+Manual install: press **Reveal Folder** on the Plugins page and copy the
+10 plugin files (`podcast.py`, `protocol.py`, `store.py`, `directory.py`,
+`feed.py`, `stream.py`, `handlers.py`, `plugin.json`, `icon.svg`,
+`README.md`) into a folder named `podcast` (it must match its
+`plugin.json` id).
 
 ## Configuration
 
@@ -37,20 +59,22 @@ Two settings on the Plugins page:
 
 ## Architecture
 
-The plugin is a single Python process that speaks newline-delimited JSON-RPC 2.0
-over stdin/stdout with the Rox host. It uses only the Python standard library.
+The plugin is a Python process that speaks newline-delimited JSON-RPC 2.0
+over stdin/stdout with the Rox host. It uses only the Python standard library,
+split into one module per responsibility:
 
 ```
 Rox Host (Rust)
     │  JSON-RPC 2.0 over stdin/stdout
     ▼
-podcast.py
-    ├── Apple Directory Gateway   (itunes.apple.com search / charts / lookup)
-    ├── RSS Parser Engine        (ElementTree, Podlove psc:chapters)
-    ├── Streaming Proxy          (HTTP range, keep-alive, 3xx follow)
-    ├── SQLite persistence       (subscriptions, show cache — in data_dir, hash-safe)
-    └── JSON-RPC handlers        (hello, browse, search, sync, open, read, close,
-                                   cover, link, action, flags, shutdown)
+podcast.py      (entry point: transport loop only)
+    ├── protocol.py    (globals, transport, feature-gated builders, parsers)
+    ├── store.py       (SQLite persistence in data_dir — hash-safe)
+    ├── directory.py   (Apple Directory Gateway: search / charts / lookup)
+    ├── feed.py        (RSS Parser Engine: ElementTree, Podlove psc:chapters)
+    ├── stream.py      (Streaming Proxy: HTTP range, keep-alive, 3xx follow)
+    └── handlers.py    (JSON-RPC handlers: hello, browse, search, sync, open,
+                         read, close, cover, link, action, flags, shutdown)
 ```
 
 ### Key design decisions
@@ -79,7 +103,8 @@ printf '%s\n' \
   | python3 -B -u podcast.py
 
 # Lint
-ruff check podcast.py
+ruff check .
+ruff format --check .
 ```
 
 ## License
