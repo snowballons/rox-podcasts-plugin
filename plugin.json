@@ -1,0 +1,76 @@
+{
+  "id": "podcast",
+  "name": "Podcasts",
+  "version": "1.0.0",
+  "api": 1,
+  "entry": {
+    "script": {
+      "path": "podcast.py",
+      "interpreter": "python3"
+    }
+  },
+  "meta": {
+    "author": "community",
+    "description": "Discover, subscribe to, sync, and stream podcasts via Apple Directory and publisher RSS feeds.",
+    "website": "https://github.com/zealsprince/rox",
+    "license": "AGPL-3.0-only"
+  },
+  "capabilities": {
+    "source": {
+      "label": "Podcasts",
+      "icon": "icon.svg",
+      "scrobble": false,
+      "links": true,
+      "actions": [
+        {
+          "id": "subscribe",
+          "label": "Subscribe",
+          "on": ["node"],
+          "when": "!subscribed"
+        },
+        {
+          "id": "unsubscribe",
+          "label": "Unsubscribe",
+          "on": ["node"],
+          "when": "subscribed"
+        },
+        {
+          "id": "add_feed",
+          "label": "Add Podcast by RSS URL",
+          "on": ["source"],
+          "params": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "title": "RSS Feed URL",
+                "description": "Direct HTTP/HTTPS link to podcast RSS feed"
+              }
+            },
+            "required": ["url"]
+          }
+        }
+      ]
+    }
+  },
+  "programs": [],
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "country": {
+        "type": "string",
+        "title": "Top Charts Country",
+        "description": "Two-letter ISO country code (e.g. us, gb, de, fr)",
+        "default": "us"
+      },
+      "max_episodes": {
+        "type": "integer",
+        "title": "Max Episodes per Feed",
+        "description": "Cap parsing at the newest N episodes",
+        "minimum": 20,
+        "maximum": 500,
+        "default": 300
+      }
+    }
+  }
+}
