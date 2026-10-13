@@ -61,6 +61,36 @@ def decode_feed_body(content, http_charset):
     raise Failure(-32000, "Feed body is not decodable text")
 
 
+def codec_for(enc_type, audio_url):
+    """Display codec from enclosure mime or extension; '' when unknown."""
+    lower_url = audio_url.split("?", 1)[0].lower()
+    if "mpeg" in enc_type or lower_url.endswith(".mp3"):
+        return "MP3"
+    if "mp4" in enc_type or lower_url.endswith((".m4a", ".mp4", ".m4b")):
+        return "AAC"
+    if "aac" in enc_type:
+        return "AAC"
+    if "opus" in enc_type or lower_url.endswith(".opus"):
+        return "Opus"
+    if (
+        "ogg" in enc_type
+        or "vorbis" in enc_type
+        or lower_url.endswith((".ogg", ".oga"))
+    ):
+        return "Vorbis"
+    if "wav" in enc_type or lower_url.endswith(".wav"):
+        return "PCM"
+    return ""
+
+
+def episode_number(item, ns, fallback):
+    """The itunes:episode number, or the feed-order fallback."""
+    raw = (item.findtext("itunes:episode", namespaces=ns) or "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return min(int(raw), 65535)
+    return fallback
+
+
 def parse_feed(feed_url):
     cached = get_feed_cache(feed_url)
     headers = {"User-Agent": USER_AGENT}
@@ -118,6 +148,11 @@ def parse_feed(feed_url):
         if img_node is not None:
             show_image = (img_node.findtext("url") or "").strip()
 
+    show_genre = ""
+    category_node = channel.find("itunes:category", namespaces=ns)
+    if category_node is not None:
+        show_genre = (category_node.attrib.get("text") or "").strip()
+
     episodes = []
     items = channel.findall("item")
     limit = state["max_episodes"]
@@ -166,15 +201,13 @@ def parse_feed(feed_url):
             "artist": clip(show_author or show_title),
             "album_artist": clip(show_author or show_title),
             "album": clip(show_title),
-            "genre": "Podcast",
+            "genre": clip(show_genre),
             "year": pub_year,
             "disc_no": 1,
-            "track_no": idx + 1,
+            "track_no": episode_number(item, ns, idx + 1),
             "duration_ms": duration_ms,
-            "codec": "MP3"
-            if "mpeg" in enc_type or audio_url.endswith(".mp3")
-            else "AAC",
-            "bitrate_kbps": 128,
+            "codec": codec_for(enc_type, audio_url),
+            "bitrate_kbps": 0,
             "live": False,
         }
 
