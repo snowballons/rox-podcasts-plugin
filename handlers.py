@@ -201,6 +201,7 @@ def rpc_browse(params):
                 ep["audio_url"],
                 ep["chapters"],
                 parsed["artwork"],
+                ep.get("length"),
             )
             entries.append({"track": track})
         return {"entries": entries, "cursor": None}
@@ -292,25 +293,28 @@ def rpc_open(params):
                     ep["audio_url"],
                     ep["chapters"],
                     parsed["artwork"],
+                    ep.get("length"),
                 )
             meta = ep_metadata_cache.get(key)
     if not meta:
         raise Failure(-32000, f"Unknown track key: {key}")
 
-    audio_url, chapters, _ = meta
+    audio_url, chapters, _, cached_length = meta
 
-    # Probe content-length
-    length = None
-    req = urllib.request.Request(
-        audio_url, method="HEAD", headers={"User-Agent": USER_AGENT}
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-            cl = resp.getheader("Content-Length")
-            if cl and cl.isdigit():
-                length = int(cl)
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
-        pass
+    # Prefer the RSS enclosure length; a HEAD probe re-walks the whole
+    # redirect chain, so it is only a fallback for feeds without one.
+    length = cached_length
+    if length is None:
+        req = urllib.request.Request(
+            audio_url, method="HEAD", headers={"User-Agent": USER_AGENT}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                cl = resp.getheader("Content-Length")
+                if cl and cl.isdigit():
+                    length = int(cl)
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+            pass
 
     with streams_lock:
         sid = f"s{next(stream_ids)}"

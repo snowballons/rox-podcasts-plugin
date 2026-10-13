@@ -67,6 +67,13 @@ def parse_feed(feed_url):
         audio_url = enclosure.attrib.get("url", "").strip()
         enc_type = enclosure.attrib.get("type", "").lower()
 
+        # The RSS enclosure length saves a HEAD round trip per open
+        # (which otherwise re-walks the whole redirect chain).
+        enc_length = None
+        raw_length = (enclosure.attrib.get("length") or "").strip()
+        if raw_length.isdigit() and int(raw_length) > 0:
+            enc_length = int(raw_length)
+
         # Audio mime or extension check
         if not (
             enc_type.startswith("audio/")
@@ -114,6 +121,7 @@ def parse_feed(feed_url):
                 "track": track_entry,
                 "audio_url": audio_url,
                 "chapters": chapters,
+                "length": enc_length,
             }
         )
 

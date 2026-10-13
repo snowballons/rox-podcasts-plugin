@@ -13,6 +13,10 @@ import urllib.parse
 
 from protocol import HTTP_TIMEOUT, USER_AGENT, Failure, log
 
+# Podcast prefix chains (podtrac/pdst/vpixl/...) routinely need 5 hops
+# before bytes; 10 matches urllib/curl defaults and our feed policy.
+MAX_REDIRECTS = 10
+
 
 class StreamInstance:
     def __init__(self, url, length, chapters):
@@ -35,7 +39,9 @@ class StreamInstance:
 
     def read_range(self, start, end, want):
         with self.lock:
-            for _ in range(5):  # Follow up to 5 HTTP 3xx redirects
+            hops = []
+            seen = {self.resolved_url}
+            for _ in range(MAX_REDIRECTS + 1):
                 parts = urllib.parse.urlsplit(self.resolved_url)
                 origin = (parts.scheme, parts.hostname, parts.port)
                 if self.conn is None or origin != self.origin_tuple:
@@ -64,7 +70,15 @@ class StreamInstance:
                         resp.read()
                         if not loc:
                             raise Failure(-32000, "Redirect without Location")
-                        self.resolved_url = urllib.parse.urljoin(self.resolved_url, loc)
+                        nxt = urllib.parse.urljoin(self.resolved_url, loc)
+                        hops.append(f"{resp.status} {self.resolved_url} -> {nxt}")
+                        if nxt in seen:
+                            log(
+                                f"redirect loop detected: {nxt} (hops: {'; '.join(hops)})"
+                            )
+                            raise Failure(-32000, f"Redirect loop detected: {nxt}")
+                        seen.add(nxt)
+                        self.resolved_url = nxt
                         continue
 
                     if resp.status == 416:
@@ -90,12 +104,16 @@ class StreamInstance:
                         self.conn = None
                     raise Failure(-32000, f"Stream read error: {e}")
 
-            raise Failure(-32000, "Too many redirects")
+            log(
+                f"too many redirects ({len(hops)} hops from {self.origin_url}, "
+                f"last: {self.resolved_url})"
+            )
+            raise Failure(-32000, f"Too many redirects ({len(hops)} hops)")
 
 
 streams = {}
 streams_lock = threading.Lock()
 stream_ids = iter(range(1, 1 << 62))
 
-# Ep cache: map track key -> (audio_url, chapters, artwork)
+# Ep cache: map track key -> (audio_url, chapters, artwork, length)
 ep_metadata_cache = {}
