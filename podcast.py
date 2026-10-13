@@ -166,7 +166,63 @@ def get_show_artwork(feed_url):
         row = db_conn.execute(
             "SELECT artwork FROM shows WHERE feed_url = ?", (feed_url,)
         ).fetchone()
+        if row and row[0]:
+            return row[0]
+        row = db_conn.execute(
+            "SELECT artwork FROM subscriptions WHERE feed_url = ?", (feed_url,)
+        ).fetchone()
         return row[0] if row and row[0] else None
+
+
+def resolve_feed_url(key):
+    """Resolve a show:<hash> key to its feed_url via subscriptions then shows cache."""
+    for f in get_subscriptions():
+        if clean_key(f[0]) == key:
+            return f[0]
+    cached = get_show_by_key(key)
+    if cached:
+        return cached[0]
+    return None
+
+
+STRING_CAP = 4000
+
+
+def clip(text):
+    return str(text or "").strip()[:STRING_CAP]
+
+
+def has_feature(name):
+    return name in state["features"]
+
+
+def make_node(nid, title, subtitle="", collection=False, kind="", art="", flags=None, home=False):
+    """Build a browse node, gating optional fields behind hello features."""
+    body = {"id": nid, "title": clip(title), "subtitle": clip(subtitle), "collection": collection}
+    if kind and has_feature("node-kind"):
+        body["kind"] = kind
+    if art and has_feature("node-art"):
+        body["art"] = art
+    if flags is not None and has_feature("flags"):
+        body["flags"] = flags
+    if home and has_feature("home"):
+        body["home"] = True
+    return {"node": body}
+
+
+def make_section(title, entries, tiles=False):
+    """Wrap entries under a heading; plain rows when sections unsupported."""
+    if not entries or not has_feature("sections"):
+        return entries
+    heading = {"title": clip(title)}
+    if tiles and has_feature("tiles"):
+        heading["layout"] = "tiles"
+    return [{"section": heading}] + entries
+
+
+def show_art_key(feed_url):
+    """Single art scheme for every show node: the node id itself."""
+    return f"show:{clean_key(feed_url)}"
 
 
 def mime_of(data):
@@ -177,7 +233,7 @@ def mime_of(data):
         return "image/png"
     if data[:3] == b"GIF":
         return "image/gif"
-    if data[:4] == b"WEBP":
+    if len(data) >= 12 and data[0:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
     return None
 
@@ -353,10 +409,10 @@ def parse_feed(feed_url):
 
         track_entry = {
             "key": ep_key,
-            "title": title,
-            "artist": show_author or show_title,
-            "album_artist": show_author or show_title,
-            "album": show_title,
+            "title": clip(title),
+            "artist": clip(show_author or show_title),
+            "album_artist": clip(show_author or show_title),
+            "album": clip(show_title),
             "genre": "Podcast",
             "year": pub_year,
             "disc_no": 1,
@@ -365,7 +421,6 @@ def parse_feed(feed_url):
             "codec": "MP3" if "mpeg" in enc_type or audio_url.endswith(".mp3") else "AAC",
             "bitrate_kbps": 128,
             "live": False,
-            "values": {},
         }
 
         episodes.append({
@@ -402,7 +457,7 @@ class StreamInstance:
                     log(f"stream close error: {e}")
             self.conn = None
 
-    def read_range(self, start, end):
+    def read_range(self, start, end, want):
         with self.lock:
             for _ in range(5):  # Follow up to 5 HTTP 3xx redirects
                 parts = urllib.parse.urlsplit(self.resolved_url)
@@ -427,14 +482,25 @@ class StreamInstance:
                     if resp.status in (301, 302, 303, 307, 308):
                         loc = resp.getheader("Location")
                         resp.read()
+                        if not loc:
+                            raise Failure(-32000, "Redirect without Location")
                         self.resolved_url = urllib.parse.urljoin(self.resolved_url, loc)
                         continue
 
+                    if resp.status == 416:
+                        resp.read()
+                        return b""
                     if resp.status not in (200, 206):
                         raise Failure(-32000, f"Upstream HTTP error: {resp.status}")
 
                     data = resp.read()
-                    return data
+                    if resp.status == 200:
+                        # Server ignored Range and sent the whole file:
+                        # slice the requested window instead of the full body.
+                        if start >= len(data):
+                            return b""
+                        return data[start:start + want]
+                    return data[:want]
                 except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
                     if self.conn:
                         try:
@@ -473,12 +539,10 @@ def rpc_browse(params):
     # 1. Roots
     if node is None:
         entries = [
-            {"node": {"id": "home", "title": "Home", "subtitle": "Top charts & subscriptions", "collection": False, "home": True, "kind":
-"folder"}},
-            {"node": {"id": "subs", "title": "Subscriptions", "subtitle": "Your saved shows", "collection": False, "kind": "folder"}},
-            {"node": {"id": "charts", "title": "Top Charts", "subtitle": f"Top shows in {state['country'].upper()}", "collection": False, "kind":
-"folder"}},
-            {"node": {"id": "categories", "title": "Categories", "subtitle": "Browse by genre", "collection": False, "kind": "folder"}},
+            make_node("home", "Home", "Top charts & subscriptions", False, "folder", "", None, True),
+            make_node("subs", "Subscriptions", "Your saved shows", False, "folder"),
+            make_node("charts", "Top Charts", f"Top shows in {state['country'].upper()}", False, "folder"),
+            make_node("categories", "Categories", "Browse by genre", False, "folder"),
         ]
         return {"entries": entries, "cursor": None}
 
@@ -488,110 +552,80 @@ def rpc_browse(params):
         # Subscriptions Shelf
         subs = get_subscriptions()
         if subs:
-            sub_nodes = [{
-                "id": f"show:{clean_key(f[0])}",
-                "title": f[1] or "Show",
-                "subtitle": f[2],
-                "collection": True,
-                "kind": "album",
-                "art": f[0],
-                "flags": ["subscribed"],
-            } for f in subs[:10]]
-            sections.append({"section": {"title": "Subscribed Podcasts", "layout": "tiles"}})
-            sections.extend([{"node": n} for n in sub_nodes])
+            sub_nodes = [
+                make_node(
+                    f"show:{clean_key(f[0])}", f[1] or "Show", f[2], True, "album",
+                    show_art_key(f[0]), ["subscribed"],
+                )
+                for f in subs[:10]
+            ]
+            sections.extend(make_section("Subscribed Podcasts", sub_nodes, tiles=True))
 
         # Top Charts Shelf
         top = apple_top_charts(state["country"])[:10]
         if top:
-            top_nodes = [{
-                "id": t["id"],
-                "title": t["title"],
-                "subtitle": t["author"],
-                "collection": True,
-                "kind": "album",
-                "art": t["feed_url"],
-                "flags": ["subscribed"] if is_subscribed(t["feed_url"]) else [],
-            } for t in top]
-            sections.append({"section": {"title": f"Top Charts ({state['country'].upper()})", "layout": "tiles"}})
-            sections.extend([{"node": n} for n in top_nodes])
+            top_nodes = [
+                make_node(
+                    t["id"], t["title"], t["author"], True, "album",
+                    show_art_key(t["feed_url"]),
+                    ["subscribed"] if is_subscribed(t["feed_url"]) else [],
+                )
+                for t in top
+            ]
+            sections.extend(make_section(f"Top Charts ({state['country'].upper()})", top_nodes, tiles=True))
 
         return {"entries": sections, "cursor": None}
 
     # 3. Subscriptions
     if node == "subs":
         subs = get_subscriptions()
-        entries = [{
-            "node": {
-                "id": f"show:{clean_key(f[0])}",
-                "title": f[1] or f[0],
-                "subtitle": f[2],
-                "collection": True,
-                "kind": "album",
-                "art": f[0],
-                "flags": ["subscribed"],
-            }
-        } for f in subs]
+        entries = [
+            make_node(
+                f"show:{clean_key(f[0])}", f[1] or f[0], f[2], True, "album",
+                show_art_key(f[0]), ["subscribed"],
+            )
+            for f in subs
+        ]
         return {"entries": entries, "cursor": None}
 
     # 4. Top Charts
     if node == "charts":
         shows = apple_top_charts(state["country"])
-        entries = [{
-            "node": {
-                "id": s["id"],
-                "title": s["title"],
-                "subtitle": s["author"],
-                "collection": True,
-                "kind": "album",
-                "art": s["artwork"],
-                "flags": ["subscribed"] if is_subscribed(s["feed_url"]) else [],
-            }
-        } for s in shows]
+        entries = [
+            make_node(
+                s["id"], s["title"], s["author"], True, "album",
+                show_art_key(s["feed_url"]),
+                ["subscribed"] if is_subscribed(s["feed_url"]) else [],
+            )
+            for s in shows
+        ]
         return {"entries": entries, "cursor": None}
 
     # 5. Categories
     if node == "categories":
-        entries = [{
-            "node": {
-                "id": f"genre:{g[0]}:{g[1]}",
-                "title": g[1],
-                "subtitle": "Category",
-                "collection": False,
-                "kind": "folder",
-            }
-        } for g in GENRES]
+        entries = [
+            make_node(f"genre:{g[0]}:{g[1]}", g[1], "Category", False, "folder")
+            for g in GENRES
+        ]
         return {"entries": entries, "cursor": None}
 
     if node.startswith("genre:"):
         _, gid, gname = node.split(":", 2)
         shows = apple_search(gname, genre_id=gid)
-        entries = [{
-            "node": {
-                "id": s["id"],
-                "title": s["title"],
-                "subtitle": s["author"],
-                "collection": True,
-                "kind": "album",
-                "art": s["artwork"],
-                "flags": ["subscribed"] if is_subscribed(s["feed_url"]) else [],
-            }
-        } for s in shows]
+        entries = [
+            make_node(
+                s["id"], s["title"], s["author"], True, "album",
+                show_art_key(s["feed_url"]),
+                ["subscribed"] if is_subscribed(s["feed_url"]) else [],
+            )
+            for s in shows
+        ]
         return {"entries": entries, "cursor": None}
 
     # 6. Show Node (Returns Episodes)
-    # 6. Show Node (Returns Episodes)
     if node.startswith("show:"):
         key = node[len("show:"):]
-        # Resolve feed_url from subscriptions or the cached shows table
-        feed_url = None
-        for f in get_subscriptions():
-            if clean_key(f[0]) == key:
-                feed_url = f[0]
-                break
-        if not feed_url:
-            cached = get_show_by_key(key)
-            if cached:
-                feed_url = cached[0]
+        feed_url = resolve_feed_url(key)
         if not feed_url:
             raise Failure(-32602, f"Feed for node {node} not cached")
 
@@ -618,17 +652,11 @@ def rpc_search(params):
             # Do NOT auto-subscribe; preview only
             node_id = f"show:{clean_key(query)}"
             return {
-                "entries": [{
-                    "node": {
-                        "id": node_id,
-                        "title": feed["title"],
-                        "subtitle": feed["author"],
-                        "collection": True,
-                        "kind": "album",
-                        "art": feed["artwork"],
-                        "flags": ["subscribed"],
-                    }
-                }],
+                "entries": [make_node(
+                    node_id, feed["title"], feed["author"], True, "album",
+                    show_art_key(query),
+                    ["subscribed"] if is_subscribed(query) else [],
+                )],
                 "cursor": None,
             }
         except Exception as e:  # noqa: BLE001 - network feed parse failures
@@ -636,17 +664,11 @@ def rpc_search(params):
 
     # Text query via Apple API
     shows = apple_search(query)
-    entries = [{
-        "node": {
-            "id": s["id"],
-            "title": s["title"],
-            "subtitle": s["author"],
-            "collection": True,
-            "kind": "album",
-            "art": s["artwork"],
-            "flags": ["subscribed"] if is_subscribed(s["feed_url"]) else [],
-        }
-    } for s in shows]
+    entries = [make_node(
+        s["id"], s["title"], s["author"], True, "album",
+        show_art_key(s["feed_url"]),
+        ["subscribed"] if is_subscribed(s["feed_url"]) else [],
+    ) for s in shows]
     return {"entries": entries, "cursor": None}
 
 def rpc_sync(params):
@@ -656,15 +678,7 @@ def rpc_sync(params):
         raise Failure(-32602, f"Invalid collection id: {collection}")
 
     key = collection[len("show:"):]
-    feed_url = None
-    for f in get_subscriptions():
-        if clean_key(f[0]) == key:
-            feed_url = f[0]
-            break
-    if not feed_url:
-        cached = get_show_by_key(key)
-        if cached:
-            feed_url = cached[0]
+    feed_url = resolve_feed_url(key)
     if not feed_url:
         raise Failure(-32602, "Collection not in subscriptions")
 
@@ -677,6 +691,19 @@ def rpc_sync(params):
 
     return {"unchanged": False, "tracks": tracks, "cursor": None, "token": new_token}
 
+def hint_for_url(audio_url):
+    lower = audio_url.split("?", 1)[0].lower()
+    if lower.endswith(".mp3"):
+        return "mp3"
+    if lower.endswith((".m4a", ".mp4", ".m4b", ".aac")):
+        return "m4a"
+    if lower.endswith((".ogg", ".oga", ".opus")):
+        return "ogg"
+    if lower.endswith(".wav"):
+        return "wav"
+    return ""
+
+
 def rpc_open(params):
     global stream_counter
     key = params.get("key")
@@ -684,15 +711,7 @@ def rpc_open(params):
     if not meta and key.startswith("ep:"):
         # Fallback: the track key embeds the feed key. Resolve and parse.
         feed_key, _, _ = key[3:].partition(":")
-        feed_url = None
-        for f in get_subscriptions():
-            if clean_key(f[0]) == feed_key:
-                feed_url = f[0]
-                break
-        if not feed_url:
-            cached = get_show_by_key(feed_key)
-            if cached:
-                feed_url = cached[0]
+        feed_url = resolve_feed_url(feed_key)
         if feed_url:
             parsed = parse_feed(feed_url)
             for ep in parsed["episodes"]:
@@ -720,15 +739,17 @@ def rpc_open(params):
         sid = f"s{stream_counter}"
         streams[sid] = StreamInstance(audio_url, length, chapters)
 
-    return {
+    result = {
         "stream": sid,
-        "hint": "mp3" if audio_url.endswith(".mp3") else "m4a",
+        "hint": hint_for_url(audio_url),
         "length": length,
-        "seekable": True,
+        "seekable": length is not None,
         "live": False,
         "buffer": "ahead",
-        "chapters": chapters[:500],
     }
+    if chapters and has_feature("chapters"):
+        result["chapters"] = chapters[:500]
+    return result
 
 def rpc_read(params):
     sid = params.get("stream")
@@ -739,9 +760,15 @@ def rpc_read(params):
 
     offset = int(params.get("offset") or 0)
     want = min(int(params.get("len") or 0), CHUNK_CAP)
+    if want <= 0:
+        return {"data": ""}
+    if stream.length is not None and offset >= stream.length:
+        return {"data": ""}
     end = offset + want - 1
+    if stream.length is not None:
+        end = min(end, stream.length - 1)
 
-    data = stream.read_range(offset, end)
+    data = stream.read_range(offset, end, want)
     return {"data": base64.b64encode(data).decode("ascii")}
 
 def rpc_close(params):
@@ -756,17 +783,11 @@ def rpc_cover(params):
     url = None
 
     if key.startswith("show:"):
-        # Show node cover: resolve show hash → feed_url → artwork
+        # Show node cover: resolve show hash → feed_url → artwork.
+        # Art keys are unified as show:<hash>, but also accept a raw
+        # artwork URL for backwards compatibility with older caches.
         feed_key = key[len("show:"):]
-        feed_url = None
-        for f in get_subscriptions():
-            if clean_key(f[0]) == feed_key:
-                feed_url = f[0]
-                break
-        if not feed_url:
-            cached = get_show_by_key(feed_key)
-            if cached:
-                feed_url = cached[0]
+        feed_url = resolve_feed_url(feed_key)
         if feed_url:
             url = get_show_artwork(feed_url)
     elif key.startswith("ep:"):
@@ -809,15 +830,31 @@ def rpc_action(params):
     if action == "subscribe":
         flags = {}
         for item in items:
-            feed_url = None
-            if item.startswith("show:"):
-                # Node key
-                for f in get_subscriptions():
-                    if f[0] == item:
-                        feed_url = f[0]
-            if feed_url:
-                add_subscription(feed_url)
-                flags[item] = ["subscribed"]
+            if not item.startswith("show:"):
+                continue
+            k = item[len("show:"):]
+            feed_url = resolve_feed_url(k)
+            if not feed_url:
+                continue
+            # Preserve known metadata so covers/flags keep working.
+            title, author, artwork, genre = "", "", "", ""
+            for f in get_subscriptions():
+                if clean_key(f[0]) == k:
+                    _, title, author, artwork, genre = f
+                    break
+            if not title:
+                cached = get_show(feed_url)
+                if cached:
+                    title, author, artwork, genre = cached
+            if not title:
+                try:
+                    parsed = parse_feed(feed_url)
+                    title, author, artwork = parsed["title"], parsed["author"], parsed["artwork"]
+                    cache_show(feed_url, title, author, artwork)
+                except Failure:
+                    pass
+            add_subscription(feed_url, title, author, artwork, genre)
+            flags[item] = ["subscribed"]
         return {"message": "Subscribed to podcast", "flags": flags}
 
     if action == "unsubscribe":
@@ -837,6 +874,7 @@ def rpc_action(params):
         if not url:
             raise Failure(-32602, "Feed URL required")
         parsed = parse_feed(url)
+        cache_show(url, parsed["title"], parsed["author"], parsed["artwork"])
         add_subscription(url, parsed["title"], parsed["author"], parsed["artwork"])
         return {"message": f"Added {parsed['title']}"}
 
