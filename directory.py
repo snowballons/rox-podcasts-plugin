@@ -22,6 +22,15 @@ GENRES = [
     ("1512", "Health & Fitness"),
     ("1321", "Business"),
     ("1310", "Music"),
+    ("1545", "Sports"),
+    ("1301", "Arts"),
+    ("1304", "Education"),
+    ("1483", "Fiction"),
+    ("1309", "TV & Film"),
+    ("1314", "Religion & Spirituality"),
+    ("1305", "Kids & Family"),
+    ("1502", "Leisure"),
+    ("1511", "Government"),
 ]
 
 
