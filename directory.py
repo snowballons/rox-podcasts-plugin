@@ -72,23 +72,42 @@ def apple_search(term, genre_id=None):
     return results
 
 
+def normalize_country(country):
+    """Two-letter lowercase country code, defaulting to us like cliamp."""
+    country = (country or "").strip().lower()
+    if len(country) != 2 or not country.isalpha():
+        return "us"
+    return country
+
+
 def apple_top_charts(country):
-    url = f"https://itunes.apple.com/{country.lower()}/rss/toppodcasts/limit=50/json"
+    country = normalize_country(country)
+    url = (
+        f"https://rss.marketingtools.apple.com/api/v2/"
+        f"{country}/podcasts/top/100/podcasts.json"
+    )
     data = fetch_json(url)
-    if not data or "feed" not in data or "entry" not in data["feed"]:
+    if not data:
         return []
-    entries = data["feed"]["entry"]
+    try:
+        entries = data["feed"]["results"]
+    except (KeyError, TypeError):
+        log(f"top charts for {country}: missing feed.results")
+        return []
     ids = []
-    for e in entries:
-        im_id = e.get("id", {}).get("attributes", {}).get("im:id")
-        if im_id:
-            ids.append(im_id)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            log(f"top charts for {country}: null result entry")
+            return []
+        chart_id = (entry.get("id") or "").strip()
+        if chart_id:
+            ids.append(chart_id)
     if not ids:
         return []
 
     # Batched lookup
     lookup_url = (
-        f"https://itunes.apple.com/lookup?id={','.join(ids[:50])}&entity=podcast"
+        f"https://itunes.apple.com/lookup?id={','.join(ids[:100])}&entity=podcast"
     )
     l_data = fetch_json(lookup_url) or {}
     show_map = {}
@@ -113,5 +132,12 @@ def apple_top_charts(country):
                 show["episodes"],
             )
             show_map[str(item.get("collectionId"))] = show
-    # Preserve rank order
-    return [show_map[i] for i in ids if i in show_map]
+    # Preserve rank order, deduplicated by feed URL.
+    ranked = []
+    seen_feeds = set()
+    for chart_id in ids:
+        show = show_map.get(chart_id)
+        if show and show["feed_url"] not in seen_feeds:
+            seen_feeds.add(show["feed_url"])
+            ranked.append(show)
+    return ranked
