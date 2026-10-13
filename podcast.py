@@ -56,22 +56,29 @@ fan = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
 # ── JSON-RPC Transport ─────────────────────────────────────────────
 
+
 def send(frame):
-    payload = (json.dumps(frame, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+    payload = (
+        json.dumps(frame, separators=(",", ":"), ensure_ascii=False) + "\n"
+    ).encode("utf-8")
     with out_lock:
         sys.stdout.buffer.write(payload)
         sys.stdout.buffer.flush()
 
+
 def log(text):
     sys.stderr.write(f"{str(text)[:4000]}\n")
     sys.stderr.flush()
+
 
 class Failure(Exception):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
 
+
 # ── Database & Persistence ─────────────────────────────────────────
+
 
 def init_db(data_dir):
     global db_conn
@@ -111,45 +118,63 @@ def init_db(data_dir):
         """)
         db_conn.commit()
 
+
 def is_subscribed(feed_url):
     with db_lock:
-        row = db_conn.execute("SELECT 1 FROM subscriptions WHERE feed_url = ?", (feed_url,)).fetchone()
+        row = db_conn.execute(
+            "SELECT 1 FROM subscriptions WHERE feed_url = ?", (feed_url,)
+        ).fetchone()
         return row is not None
+
 
 def add_subscription(feed_url, title="", author="", artwork="", genre=""):
     with db_lock:
-        db_conn.execute("""
+        db_conn.execute(
+            """
             INSERT OR REPLACE INTO subscriptions (feed_url, title, author, artwork, genre, subscribed_at)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (feed_url, title, author, artwork, genre, int(time.time())))
+        """,
+            (feed_url, title, author, artwork, genre, int(time.time())),
+        )
         db_conn.commit()
+
 
 def remove_subscription(feed_url):
     with db_lock:
         db_conn.execute("DELETE FROM subscriptions WHERE feed_url = ?", (feed_url,))
         db_conn.commit()
 
+
 def get_subscriptions():
     with db_lock:
-        cur = db_conn.execute("SELECT feed_url, title, author, artwork, genre FROM subscriptions ORDER BY subscribed_at DESC")
+        cur = db_conn.execute(
+            "SELECT feed_url, title, author, artwork, genre FROM subscriptions ORDER BY subscribed_at DESC"
+        )
         return cur.fetchall()
+
 
 def cache_show(feed_url, title="", author="", artwork="", genre="", episode_count=0):
     """Cache show metadata so browse/open can resolve feed URLs without a live subscription."""
     with db_lock:
-        db_conn.execute("""
+        db_conn.execute(
+            """
             INSERT OR REPLACE INTO shows (feed_url, title, author, artwork, genre, episode_count, cached_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (feed_url, title, author, artwork, genre, episode_count, int(time.time())))
+        """,
+            (feed_url, title, author, artwork, genre, episode_count, int(time.time())),
+        )
         db_conn.commit()
+
 
 def get_show(feed_url):
     """Return cached show metadata (title, author, artwork, genre) or None."""
     with db_lock:
         row = db_conn.execute(
-            "SELECT title, author, artwork, genre FROM shows WHERE feed_url = ?", (feed_url,)
+            "SELECT title, author, artwork, genre FROM shows WHERE feed_url = ?",
+            (feed_url,),
         ).fetchone()
         return row
+
 
 def get_show_by_key(key):
     """Resolve a show node key (sha256[:24] of feed_url) to its feed_url, or None."""
@@ -159,6 +184,7 @@ def get_show_by_key(key):
             if clean_key(feed_url) == key:
                 return (feed_url,)
         return None
+
 
 def get_show_artwork(feed_url):
     """Return the cached artwork URL for a show, or None."""
@@ -196,9 +222,16 @@ def has_feature(name):
     return name in state["features"]
 
 
-def make_node(nid, title, subtitle="", collection=False, kind="", art="", flags=None, home=False):
+def make_node(
+    nid, title, subtitle="", collection=False, kind="", art="", flags=None, home=False
+):
     """Build a browse node, gating optional fields behind hello features."""
-    body = {"id": nid, "title": clip(title), "subtitle": clip(subtitle), "collection": collection}
+    body = {
+        "id": nid,
+        "title": clip(title),
+        "subtitle": clip(subtitle),
+        "collection": collection,
+    }
     if kind and has_feature("node-kind"):
         body["kind"] = kind
     if art and has_feature("node-art"):
@@ -237,7 +270,9 @@ def mime_of(data):
         return "image/webp"
     return None
 
+
 # ── Helpers & Parsers ──────────────────────────────────────────────
+
 
 def parse_duration_ms(raw):
     if not raw:
@@ -251,12 +286,15 @@ def parse_duration_ms(raw):
     parts = s.split(":")
     try:
         if len(parts) == 3:
-            return (int(parts[0]) * 3600 + int(parts[1]) * 60 + int(float(parts[2]))) * 1000
+            return (
+                int(parts[0]) * 3600 + int(parts[1]) * 60 + int(float(parts[2]))
+            ) * 1000
         if len(parts) == 2:
             return (int(parts[0]) * 60 + int(float(parts[1]))) * 1000
     except ValueError:
         return 0
     return 0
+
 
 def parse_pub_date(raw):
     if not raw:
@@ -267,17 +305,25 @@ def parse_pub_date(raw):
     except (TypeError, ValueError, OverflowError):
         return 0
 
+
 def clean_key(raw):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
+
 # ── Apple Directory Gateway ────────────────────────────────────────
+
 
 def fetch_json(url):
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             return json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, UnicodeDecodeError) as e:
+    except (
+        urllib.error.URLError,
+        urllib.error.HTTPError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+    ) as e:
         log(f"fetch_json failed for {url}: {e}")
         return None
 
@@ -302,9 +348,17 @@ def apple_search(term, genre_id=None):
             "genre": item.get("primaryGenreName", ""),
             "episodes": item.get("trackCount", 0),
         }
-        cache_show(feed_url, show["title"], show["author"], show["artwork"], show["genre"], show["episodes"])
+        cache_show(
+            feed_url,
+            show["title"],
+            show["author"],
+            show["artwork"],
+            show["genre"],
+            show["episodes"],
+        )
         results.append(show)
     return results
+
 
 def apple_top_charts(country):
     url = f"https://itunes.apple.com/{country.lower()}/rss/toppodcasts/limit=50/json"
@@ -321,7 +375,9 @@ def apple_top_charts(country):
         return []
 
     # Batched lookup
-    lookup_url = f"https://itunes.apple.com/lookup?id={','.join(ids[:50])}&entity=podcast"
+    lookup_url = (
+        f"https://itunes.apple.com/lookup?id={','.join(ids[:50])}&entity=podcast"
+    )
     l_data = fetch_json(lookup_url) or {}
     show_map = {}
     for item in l_data.get("results", []):
@@ -336,12 +392,21 @@ def apple_top_charts(country):
                 "genre": item.get("primaryGenreName", ""),
                 "episodes": item.get("trackCount", 0),
             }
-            cache_show(feed_url, show["title"], show["author"], show["artwork"], show["genre"], show["episodes"])
+            cache_show(
+                feed_url,
+                show["title"],
+                show["author"],
+                show["artwork"],
+                show["genre"],
+                show["episodes"],
+            )
             show_map[str(item.get("collectionId"))] = show
     # Preserve rank order
     return [show_map[i] for i in ids if i in show_map]
 
+
 # ── RSS Parser Engine ──────────────────────────────────────────────
+
 
 def parse_feed(feed_url):
     req = urllib.request.Request(feed_url, headers={"User-Agent": USER_AGENT})
@@ -365,7 +430,11 @@ def parse_feed(feed_url):
         "psc": "http://podlove.org/simple-chapters",
     }
     show_title = (channel.findtext("title") or "Untitled Show").strip()
-    show_author = (channel.findtext("itunes:author", namespaces=ns) or channel.findtext("author") or "").strip()
+    show_author = (
+        channel.findtext("itunes:author", namespaces=ns)
+        or channel.findtext("author")
+        or ""
+    ).strip()
     show_image = ""
     img_node = channel.find("itunes:image", namespaces=ns)
     if img_node is not None and "href" in img_node.attrib:
@@ -387,7 +456,10 @@ def parse_feed(feed_url):
         enc_type = enclosure.attrib.get("type", "").lower()
 
         # Audio mime or extension check
-        if not (enc_type.startswith("audio/") or audio_url.endswith((".mp3", ".m4a", ".aac", ".ogg", ".opus"))):
+        if not (
+            enc_type.startswith("audio/")
+            or audio_url.endswith((".mp3", ".m4a", ".aac", ".ogg", ".opus"))
+        ):
             continue
 
         guid = item.findtext("guid") or audio_url
@@ -418,16 +490,20 @@ def parse_feed(feed_url):
             "disc_no": 1,
             "track_no": idx + 1,
             "duration_ms": duration_ms,
-            "codec": "MP3" if "mpeg" in enc_type or audio_url.endswith(".mp3") else "AAC",
+            "codec": "MP3"
+            if "mpeg" in enc_type or audio_url.endswith(".mp3")
+            else "AAC",
             "bitrate_kbps": 128,
             "live": False,
         }
 
-        episodes.append({
-            "track": track_entry,
-            "audio_url": audio_url,
-            "chapters": chapters,
-        })
+        episodes.append(
+            {
+                "track": track_entry,
+                "audio_url": audio_url,
+                "chapters": chapters,
+            }
+        )
 
     return {
         "title": show_title,
@@ -436,7 +512,9 @@ def parse_feed(feed_url):
         "episodes": episodes,
     }
 
+
 # ── Streaming Proxy Engine (source.open / read / close) ────────────
+
 
 class StreamInstance:
     def __init__(self, url, length, chapters):
@@ -468,7 +546,11 @@ class StreamInstance:
                             self.conn.close()
                         except OSError as e:
                             log(f"stream close error: {e}")
-                    cls = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+                    cls = (
+                        http.client.HTTPSConnection
+                        if parts.scheme == "https"
+                        else http.client.HTTPConnection
+                    )
                     self.conn = cls(parts.hostname, parts.port, timeout=HTTP_TIMEOUT)
                     self.origin_tuple = origin
 
@@ -499,7 +581,7 @@ class StreamInstance:
                         # slice the requested window instead of the full body.
                         if start >= len(data):
                             return b""
-                        return data[start:start + want]
+                        return data[start : start + want]
                     return data[:want]
                 except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
                     if self.conn:
@@ -512,6 +594,7 @@ class StreamInstance:
 
             raise Failure(-32000, "Too many redirects")
 
+
 streams = {}
 streams_lock = threading.Lock()
 stream_counter = 0
@@ -520,6 +603,7 @@ stream_counter = 0
 ep_metadata_cache = {}
 
 # ── JSON-RPC Method Handlers ───────────────────────────────────────
+
 
 def rpc_hello(params):
     state["data_dir"] = params.get("data_dir")
@@ -533,15 +617,31 @@ def rpc_hello(params):
     init_db(state["data_dir"])
     return {"name": "Podcasts", "version": VERSION, "api": API}
 
+
 def rpc_browse(params):
     node = params.get("node")
 
     # 1. Roots
     if node is None:
         entries = [
-            make_node("home", "Home", "Top charts & subscriptions", False, "folder", "", None, True),
+            make_node(
+                "home",
+                "Home",
+                "Top charts & subscriptions",
+                False,
+                "folder",
+                "",
+                None,
+                True,
+            ),
             make_node("subs", "Subscriptions", "Your saved shows", False, "folder"),
-            make_node("charts", "Top Charts", f"Top shows in {state['country'].upper()}", False, "folder"),
+            make_node(
+                "charts",
+                "Top Charts",
+                f"Top shows in {state['country'].upper()}",
+                False,
+                "folder",
+            ),
             make_node("categories", "Categories", "Browse by genre", False, "folder"),
         ]
         return {"entries": entries, "cursor": None}
@@ -554,8 +654,13 @@ def rpc_browse(params):
         if subs:
             sub_nodes = [
                 make_node(
-                    f"show:{clean_key(f[0])}", f[1] or "Show", f[2], True, "album",
-                    show_art_key(f[0]), ["subscribed"],
+                    f"show:{clean_key(f[0])}",
+                    f[1] or "Show",
+                    f[2],
+                    True,
+                    "album",
+                    show_art_key(f[0]),
+                    ["subscribed"],
                 )
                 for f in subs[:10]
             ]
@@ -566,13 +671,21 @@ def rpc_browse(params):
         if top:
             top_nodes = [
                 make_node(
-                    t["id"], t["title"], t["author"], True, "album",
+                    t["id"],
+                    t["title"],
+                    t["author"],
+                    True,
+                    "album",
                     show_art_key(t["feed_url"]),
                     ["subscribed"] if is_subscribed(t["feed_url"]) else [],
                 )
                 for t in top
             ]
-            sections.extend(make_section(f"Top Charts ({state['country'].upper()})", top_nodes, tiles=True))
+            sections.extend(
+                make_section(
+                    f"Top Charts ({state['country'].upper()})", top_nodes, tiles=True
+                )
+            )
 
         return {"entries": sections, "cursor": None}
 
@@ -581,8 +694,13 @@ def rpc_browse(params):
         subs = get_subscriptions()
         entries = [
             make_node(
-                f"show:{clean_key(f[0])}", f[1] or f[0], f[2], True, "album",
-                show_art_key(f[0]), ["subscribed"],
+                f"show:{clean_key(f[0])}",
+                f[1] or f[0],
+                f[2],
+                True,
+                "album",
+                show_art_key(f[0]),
+                ["subscribed"],
             )
             for f in subs
         ]
@@ -593,7 +711,11 @@ def rpc_browse(params):
         shows = apple_top_charts(state["country"])
         entries = [
             make_node(
-                s["id"], s["title"], s["author"], True, "album",
+                s["id"],
+                s["title"],
+                s["author"],
+                True,
+                "album",
                 show_art_key(s["feed_url"]),
                 ["subscribed"] if is_subscribed(s["feed_url"]) else [],
             )
@@ -614,7 +736,11 @@ def rpc_browse(params):
         shows = apple_search(gname, genre_id=gid)
         entries = [
             make_node(
-                s["id"], s["title"], s["author"], True, "album",
+                s["id"],
+                s["title"],
+                s["author"],
+                True,
+                "album",
                 show_art_key(s["feed_url"]),
                 ["subscribed"] if is_subscribed(s["feed_url"]) else [],
             )
@@ -624,7 +750,7 @@ def rpc_browse(params):
 
     # 6. Show Node (Returns Episodes)
     if node.startswith("show:"):
-        key = node[len("show:"):]
+        key = node[len("show:") :]
         feed_url = resolve_feed_url(key)
         if not feed_url:
             raise Failure(-32602, f"Feed for node {node} not cached")
@@ -633,11 +759,16 @@ def rpc_browse(params):
         entries = []
         for ep in parsed["episodes"]:
             track = ep["track"]
-            ep_metadata_cache[track["key"]] = (ep["audio_url"], ep["chapters"], parsed["artwork"])
+            ep_metadata_cache[track["key"]] = (
+                ep["audio_url"],
+                ep["chapters"],
+                parsed["artwork"],
+            )
             entries.append({"track": track})
         return {"entries": entries, "cursor": None}
 
     raise Failure(-32602, f"Unknown node: {node}")
+
 
 def rpc_search(params):
     query = (params.get("query") or "").strip()
@@ -652,11 +783,17 @@ def rpc_search(params):
             # Do NOT auto-subscribe; preview only
             node_id = f"show:{clean_key(query)}"
             return {
-                "entries": [make_node(
-                    node_id, feed["title"], feed["author"], True, "album",
-                    show_art_key(query),
-                    ["subscribed"] if is_subscribed(query) else [],
-                )],
+                "entries": [
+                    make_node(
+                        node_id,
+                        feed["title"],
+                        feed["author"],
+                        True,
+                        "album",
+                        show_art_key(query),
+                        ["subscribed"] if is_subscribed(query) else [],
+                    )
+                ],
                 "cursor": None,
             }
         except Exception as e:  # noqa: BLE001 - network feed parse failures
@@ -664,12 +801,20 @@ def rpc_search(params):
 
     # Text query via Apple API
     shows = apple_search(query)
-    entries = [make_node(
-        s["id"], s["title"], s["author"], True, "album",
-        show_art_key(s["feed_url"]),
-        ["subscribed"] if is_subscribed(s["feed_url"]) else [],
-    ) for s in shows]
+    entries = [
+        make_node(
+            s["id"],
+            s["title"],
+            s["author"],
+            True,
+            "album",
+            show_art_key(s["feed_url"]),
+            ["subscribed"] if is_subscribed(s["feed_url"]) else [],
+        )
+        for s in shows
+    ]
     return {"entries": entries, "cursor": None}
+
 
 def rpc_sync(params):
     collection = params.get("collection")
@@ -677,19 +822,22 @@ def rpc_sync(params):
     if not collection.startswith("show:"):
         raise Failure(-32602, f"Invalid collection id: {collection}")
 
-    key = collection[len("show:"):]
+    key = collection[len("show:") :]
     feed_url = resolve_feed_url(key)
     if not feed_url:
         raise Failure(-32602, "Collection not in subscriptions")
 
     parsed = parse_feed(feed_url)
     tracks = [ep["track"] for ep in parsed["episodes"]]
-    new_token = hashlib.sha256("\n".join(t["key"] for t in tracks).encode()).hexdigest()[:16]
+    new_token = hashlib.sha256(
+        "\n".join(t["key"] for t in tracks).encode()
+    ).hexdigest()[:16]
 
     if token == new_token:
         return {"unchanged": True, "tracks": [], "cursor": None, "token": token}
 
     return {"unchanged": False, "tracks": tracks, "cursor": None, "token": new_token}
+
 
 def hint_for_url(audio_url):
     lower = audio_url.split("?", 1)[0].lower()
@@ -716,7 +864,11 @@ def rpc_open(params):
             parsed = parse_feed(feed_url)
             for ep in parsed["episodes"]:
                 t = ep["track"]
-                ep_metadata_cache[t["key"]] = (ep["audio_url"], ep["chapters"], parsed["artwork"])
+                ep_metadata_cache[t["key"]] = (
+                    ep["audio_url"],
+                    ep["chapters"],
+                    parsed["artwork"],
+                )
             meta = ep_metadata_cache.get(key)
     if not meta:
         raise Failure(-32000, f"Unknown track key: {key}")
@@ -725,7 +877,9 @@ def rpc_open(params):
 
     # Probe content-length
     length = None
-    req = urllib.request.Request(audio_url, method="HEAD", headers={"User-Agent": USER_AGENT})
+    req = urllib.request.Request(
+        audio_url, method="HEAD", headers={"User-Agent": USER_AGENT}
+    )
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             cl = resp.getheader("Content-Length")
@@ -751,6 +905,7 @@ def rpc_open(params):
         result["chapters"] = chapters[:500]
     return result
 
+
 def rpc_read(params):
     sid = params.get("stream")
     with streams_lock:
@@ -771,12 +926,14 @@ def rpc_read(params):
     data = stream.read_range(offset, end, want)
     return {"data": base64.b64encode(data).decode("ascii")}
 
+
 def rpc_close(params):
     sid = params.get("stream")
     with streams_lock:
         stream = streams.pop(sid, None)
     if stream:
         stream.close()
+
 
 def rpc_cover(params):
     key = params.get("key")
@@ -786,7 +943,7 @@ def rpc_cover(params):
         # Show node cover: resolve show hash → feed_url → artwork.
         # Art keys are unified as show:<hash>, but also accept a raw
         # artwork URL for backwards compatibility with older caches.
-        feed_key = key[len("show:"):]
+        feed_key = key[len("show:") :]
         feed_url = resolve_feed_url(feed_key)
         if feed_url:
             url = get_show_artwork(feed_url)
@@ -815,6 +972,7 @@ def rpc_cover(params):
     except Exception:  # noqa: BLE001 - image fetch failures
         return None
 
+
 def rpc_link(params):
     item = params.get("item")
     if item.startswith("ep:"):
@@ -822,6 +980,7 @@ def rpc_link(params):
         if meta:
             return {"url": meta[0]}
     return None
+
 
 def rpc_action(params):
     action = params.get("action")
@@ -832,7 +991,7 @@ def rpc_action(params):
         for item in items:
             if not item.startswith("show:"):
                 continue
-            k = item[len("show:"):]
+            k = item[len("show:") :]
             feed_url = resolve_feed_url(k)
             if not feed_url:
                 continue
@@ -849,7 +1008,11 @@ def rpc_action(params):
             if not title:
                 try:
                     parsed = parse_feed(feed_url)
-                    title, author, artwork = parsed["title"], parsed["author"], parsed["artwork"]
+                    title, author, artwork = (
+                        parsed["title"],
+                        parsed["author"],
+                        parsed["artwork"],
+                    )
                     cache_show(feed_url, title, author, artwork)
                 except Failure:
                     pass
@@ -861,7 +1024,7 @@ def rpc_action(params):
         flags = {}
         for item in items:
             if item.startswith("show:"):
-                k = item[len("show:"):]
+                k = item[len("show:") :]
                 for f in get_subscriptions():
                     if clean_key(f[0]) == k:
                         remove_subscription(f[0])
@@ -880,15 +1043,17 @@ def rpc_action(params):
 
     raise Failure(-32602, f"Unknown action {action}")
 
+
 def rpc_flags(params):
     items = params.get("items") or []
     flags = {}
     subs = {clean_key(f[0]): f[0] for f in get_subscriptions()}
     for it in items:
         if it.startswith("show:"):
-            k = it[len("show:"):]
+            k = it[len("show:") :]
             flags[it] = ["subscribed"] if k in subs else []
     return {"flags": flags}
+
 
 # ── Dispatcher Loop ────────────────────────────────────────────────
 
@@ -906,6 +1071,7 @@ METHODS = {
     "source.flags": rpc_flags,
 }
 
+
 def handle_request(req_id, method, params):
     handler = METHODS.get(method)
     try:
@@ -914,10 +1080,23 @@ def handle_request(req_id, method, params):
         result = handler(params)
         send({"jsonrpc": "2.0", "id": req_id, "result": result})
     except Failure as e:
-        send({"jsonrpc": "2.0", "id": req_id, "error": {"code": e.code, "message": str(e)}})
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": e.code, "message": str(e)},
+            }
+        )
     except Exception as e:  # noqa: BLE001 - catch-all for plugin handler safety
         log(f"Unhandled error in {method}: {e}")
-        send({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": str(e)}})
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32000, "message": str(e)},
+            }
+        )
+
 
 def main():
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
@@ -944,6 +1123,7 @@ def main():
 
     pool.shutdown(wait=False, cancel_futures=True)
     fan.shutdown(wait=False, cancel_futures=True)
+
 
 if __name__ == "__main__":
     main()
